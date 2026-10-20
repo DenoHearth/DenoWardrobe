@@ -133,11 +133,12 @@ local function Add(seen, itemID, source)
     if ns.NOLOOK and ns.NOLOOK[itemID] then return false end
     local slot = SLOT_OF[loc]
     if not slot then return false end
-    seen[itemID] = true
-    local list = catalog[slot]
-    list[#list + 1] = { id = itemID, slot = slot, source = source,
+    local look = { id = itemID, slot = slot, source = source,
         armor = (classID == ARMOR and ns.ARMOR_TYPES[subClassID]) and subClassID or nil,
         weapon = WeaponType(loc, classID, subClassID) }
+    seen[itemID] = look
+    local list = catalog[slot]
+    list[#list + 1] = look
     ns.catalogSize = ns.catalogSize + 1
     return true
 end
@@ -335,6 +336,25 @@ function ns.Missing(itemID, confirmed)
     if confirmed then ns.db.unknown[itemID] = true end
 end
 
+function ns.IsMissing(itemID)
+    return missing[itemID] == true
+end
+
+-- The server answered for an item it once called unknown: content goes live in phases, so a
+-- "no" is not forever (the Sets page asks again each session)
+function ns.NotMissing(itemID)
+    if missing[itemID] then
+        missing[itemID] = nil
+        ns.db.unknown[itemID] = nil
+    end
+end
+
+-- The catalogue's look for an item (its source text among others), or nil
+function ns.LookByID(itemID)
+    local look = seenAll[itemID]
+    return type(look) == "table" and look or nil
+end
+
 function ns.LoadUnknown()
     local version, build = GetBuildInfo()
     version = tostring(version) .. "." .. tostring(build)
@@ -427,11 +447,11 @@ function ns.Looks(slotKey, armor, search, weapon)
 end
 
 -- The armour a class wears from level 40 (the most it can).
-local CLASS_ARMOR = {
+ns.CLASS_ARMOR = {
     MAGE = 1, PRIEST = 1, WARLOCK = 1, ROGUE = 2, DRUID = 2,
     HUNTER = 3, SHAMAN = 3, WARRIOR = 4, PALADIN = 4, DEATHKNIGHT = 4,
 }
 function ns.PlayerArmor()
     local _, class = UnitClass("player")
-    return CLASS_ARMOR[class] or 1
+    return ns.CLASS_ARMOR[class] or 1
 end

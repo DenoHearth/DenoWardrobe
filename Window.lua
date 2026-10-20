@@ -19,6 +19,7 @@ local LEFT_W = COLS * TILE_W + 16
 local OUTFITS_PER_PAGE = 8
 
 local window, tabs = nil, {}
+local stage           -- the try-on model at the right of the Collection and Outfits pages
 local pages = {}
 local slotButtons, armorButtons, tiles, wornButtons = {}, {}, {}, {}
 local weaponButtons = {}
@@ -26,7 +27,9 @@ local scene, pageText, countText, emptyText, searchBox, nameBox, outfitRows = ni
 local outfitPageText
 -- bare: the try-on model starts from nothing instead of the gear the character wears
 -- weapon: the chosen weapon type per hand slot (nil = every type)
-local state = { slot = "CHEST", armor = nil, page = 1, outfitPage = 1, wearing = {}, search = "", bare = false, weapon = {} }
+-- setClass / setPick: the class shown on the Sets page and the set picked per class
+local state = { slot = "CHEST", armor = nil, page = 1, outfitPage = 1, wearing = {}, search = "", bare = false, weapon = {},
+    setClass = nil, setPick = {} }
 
 local NAV = {
     HEAD = "head", SHOULDER = "shoulder", BACK = "back", CHEST = "chest", WRIST = "wrist", HANDS = "hands",
@@ -72,6 +75,65 @@ end
 -- to zoom, right-drag to move, plus the game's zoom / turn / reset buttons on top.
 local TRYON_SCENE = 290
 
+local SUCCESS = Enum.ItemTryOnReason and Enum.ItemTryOnReason.Success or 0
+local DATA_PENDING = Enum.ItemTryOnReason and Enum.ItemTryOnReason.DataPending or 3
+
+-- Dresses a model scene's player actor in `pieces` ({ { slot = KEY, id = itemID }, ... }).
+-- - The character is loaded again first and the pieces go on once it is there, the way
+--   Blizzard's PaperDollFrame waits with SetOnModelLoadedCallback: a look tried on while the
+--   character loads is dropped (seen 2026-10-20).
+-- - A piece the client has no data for yet answers DataPending and stays off (seen 2026-10-20:
+--   a naked character in Battlegear of Wrath, tooltips "item 16963"): its data is asked for and
+--   the pieces go on again every half second, up to 8 s, until every one is on. A newer call on
+--   the same actor stops the older one's tries.
+-- - onResult(notShown), if given, gets { { piece, reason }, ... } after every attempt.
+-- - Looks go on the way Forever's own transmog window and dressing room put them on a scene
+--   actor (Blizzard_Transmog.lua, DressUpFrames.lua): SetItemTransmogInfo with the look's source
+--   and the inventory slot, on a character loaded bare (autoDress off). TryOn plus Undress left
+--   most sets off the model (seen 2026-10-20, three screenshots); TryOn stays for a look the
+--   game has no source for.
+local INV_SLOT = { HEAD = 1, SHOULDER = 3, BACK = 15, CHEST = 5, WRIST = 9, HANDS = 10, WAIST = 6, LEGS = 7, FEET = 8, MAIN = 16, OFF = 17 }
+
+local function PutOn(a, piece)
+    local _, sourceID = ns.LookOf(piece.id)
+    if sourceID and a.SetItemTransmogInfo and ItemUtil and ItemUtil.CreateItemTransmogInfo then
+        return a:SetItemTransmogInfo(ItemUtil.CreateItemTransmogInfo(sourceID), INV_SLOT[piece.slot], piece.slot ~= "MAIN")
+    end
+    return a:TryOn(TryOnID(piece.id), HAND[piece.slot])
+end
+
+local function DressActor(actor, pieces, bare, onResult)
+    local token = {}
+    actor.denoDress = token
+    local tries = 0
+    local function put(a)
+        if actor.denoDress ~= token then return end
+        local notShown, pending = {}, false
+        for _, piece in ipairs(pieces) do
+            local reason = PutOn(a, piece)
+            if reason ~= nil and reason ~= SUCCESS then
+                notShown[#notShown + 1] = { piece, reason }
+                if reason == DATA_PENDING then
+                    pending = true
+                    C_Item.RequestLoadItemDataByID(piece.id)
+                end
+            end
+        end
+        if onResult then onResult(notShown) end
+        if pending and tries < 16 then
+            tries = tries + 1
+            C_Timer.After(0.5, function()
+                if actor.denoDress == token and a:IsLoaded() then put(a) end
+            end)
+        end
+    end
+    -- Blizzard's actor template has it; the simulator's actors do not
+    if actor.SetOnModelLoadedCallback then actor:SetOnModelLoadedCallback(put) end
+    -- bare: loaded without the worn gear, as the game's dressing room loads it for a set
+    actor:SetModelByUnit("player", false, not bare, false, NativeForm())
+    put(actor)
+end
+
 local function DressStage(resetCamera)
     if not scene then return end
     if resetCamera or not scene:GetActiveCamera() then
@@ -80,16 +142,9 @@ local function DressStage(resetCamera)
     end
     local actor = scene:GetPlayerActor()
     if not actor then return end
-    -- A look tried on before the character has loaded is dropped (seen 2026-10-20: the first
-    -- Try on showed nothing until My Gear reloaded the model). So the looks go on again once
-    -- the model is there, the way Blizzard's PaperDollFrame waits with SetOnModelLoadedCallback.
-    local function dress(a)
-        if state.bare then a:Undress() end
-        for key, id in pairs(state.wearing) do a:TryOn(TryOnID(id), HAND[key]) end
-    end
-    actor:SetOnModelLoadedCallback(dress)
-    actor:SetModelByUnit("player", false, true, false, NativeForm())
-    dress(actor)
+    local pieces = {}
+    for key, id in pairs(state.wearing) do pieces[#pieces + 1] = { slot = key, id = id } end
+    DressActor(actor, pieces, state.bare)
 end
 
 -- The wardrobe tiles: a DressUpModel each, dressed as the game's own wardrobe dresses its tiles
@@ -176,7 +231,7 @@ end
 
 -- Collection page ----------------------------------------------------------------
 
-local Refresh, RefreshWorn
+local Refresh, RefreshWorn, RefreshSets, ReloadSetModel
 local retryQueued
 
 local function TryOn(look)
@@ -492,10 +547,20 @@ local function RefreshOutfits()
     end
 end
 
+-- the bottom tabs, in the game's order: its wardrobe has Items, then Sets
+local PAGE_ORDER = { "collection", "sets", "outfits" }
+
 local function SelectPage(name)
     for key, page in pairs(pages) do page:SetShown(key == name) end
-    PanelTemplates_SetTab(window, name == "collection" and 1 or 2)
-    if name == "outfits" then RefreshOutfits() else Refresh() end
+    for i, key in ipairs(PAGE_ORDER) do if key == name then PanelTemplates_SetTab(window, i) end end
+    -- the Sets page has its own model across the whole window, as the game's Sets view has
+    stage:SetShown(name ~= "sets")
+    if name == "outfits" then RefreshOutfits() elseif name == "sets" then RefreshSets() ReloadSetModel() else Refresh() end
+end
+
+-- whichever page is open
+local function RefreshShown()
+    if pages.collection:IsShown() then Refresh() elseif pages.sets:IsShown() then RefreshSets() else RefreshOutfits() end
 end
 
 local function TypedName()
@@ -587,6 +652,521 @@ local function RaceBackdrop(texture)
     end
 end
 
+-- Sets page --------------------------------------------------------------------------
+-- Built like the game's own Sets view (Blizzard_Collections: Mainline/Blizzard_Wardrobe.xml
+-- SetsCollectionFrame, Shared/Blizzard_Wardrobe_Sets.xml and .lua): a class's sets in a list at
+-- the left (PetList button art, the set's first piece as its icon, a grey line for where it comes
+-- from, a green line for how much is collected), and at the right the character in the whole set,
+-- the set's name in gold over the game's fade and its pieces in a row under it, the ones not yet
+-- collected faded. The game shows only the player's own class; a row of class buttons on top
+-- here shows any class's sets (his words: "tier set for each class").
+
+local CLASS_ORDER = { "WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST", "SHAMAN", "MAGE", "WARLOCK", "DRUID" }
+local PIECE_ORDER = { HEAD = 1, SHOULDER = 2, BACK = 3, CHEST = 4, WRIST = 5, HANDS = 6, WAIST = 7, LEGS = 8, FEET = 9, MAIN = 10, OFF = 11 }
+local PIECE_SPACE = 37                      -- the game's BUTTON_SPACE: piece icon plus gap
+local PROGRESS_W = 204                      -- the game's SET_PROGRESS_BAR_MAX_WIDTH
+local QUALITY_BORDER = { [2] = "green", [3] = "blue", [4] = "purple", [5] = "orange" }
+-- the game's name colours of a set in its list: complete, begun, nothing yet; red = not for you
+local GOLD, IN_PROGRESS, GREY, RED = { 1, 0.82, 0 }, { 0.251, 0.753, 0.251 }, { 0.5, 0.5, 0.5 }, { 1, 0.125, 0.125 }
+
+local sets = { classButtons = {}, pieces = {} }
+
+-- a set's pieces in the game's slot order: { { slot = "HEAD", id = itemID }, ... }
+local function Pieces(set)
+    if not set.sorted then
+        set.sorted = {}
+        for slot, id in pairs(set[6]) do set.sorted[#set.sorted + 1] = { slot = slot, id = id } end
+        table.sort(set.sorted, function(a, b) return PIECE_ORDER[a.slot] < PIECE_ORDER[b.slot] end)
+    end
+    return set.sorted
+end
+
+-- The pieces the server knows. A piece it answered "no such item" for cannot be drawn: the game
+-- reports success and the model stays bare (measured 2026-10-20 from his saved answers: every
+-- naked set was one whose pieces the server had refused, all of Tier 1 and Tier 2 among them).
+-- A piece counts only once the server has sent its data, this session or an earlier one (name
+-- or quality kept): a piece it has not answered for draws nothing either (seen 2026-10-20:
+-- Krol'dok Battlegear, never answered, stood naked). The list grows as answers come in.
+local function Confirmed(itemID)
+    if ns.IsMissing(itemID) then return false end
+    return C_Item.GetItemInfo(itemID) ~= nil or ns.db.quality[itemID] ~= nil or ns.db.names[itemID] ~= nil
+end
+
+local function Shown(set)
+    local list = {}
+    for _, piece in ipairs(Pieces(set)) do
+        if Confirmed(piece.id) then list[#list + 1] = piece end
+    end
+    return list
+end
+
+-- where the set comes from: the classic sets' own line; for Forever's own sets the loot lists'
+-- text for a piece (Forever Dungeon Journal, AtlasLoot), else the group or armour type
+local function Label(set)
+    if set[5] ~= "" and set[3] ~= "FT" then return set[5] end
+    for _, piece in ipairs(Pieces(set)) do
+        local look = ns.LookByID(piece.id)
+        local text = look and ns.SourceText(look)
+        if text and text ~= "" then return text end
+    end
+    return set[5] ~= "" and set[5] or ((ns.ARMOR_TYPES[set[3]] or "") .. " set")
+end
+
+-- Each session, every set piece is asked of the server once (a few at a time), the ones it
+-- refused before included: when it starts to know them (a new content phase), they show.
+local asked, askQueue = {}, nil
+local function AskPieces()
+    if askQueue then return end
+    askQueue = {}
+    for _, set in ipairs(ns.SETS or {}) do
+        for _, piece in ipairs(Pieces(set)) do
+            if not asked[piece.id] then
+                asked[piece.id] = true
+                if not C_Item.GetItemInfo(piece.id) then askQueue[#askQueue + 1] = piece.id end
+            end
+        end
+    end
+    local at = 1
+    C_Timer.NewTicker(0.25, function(ticker)
+        for _ = 1, 20 do
+            local id = askQueue[at]
+            if not id then ticker:Cancel() return end
+            at = at + 1
+            C_Item.RequestLoadItemDataByID(id)
+        end
+    end)
+end
+
+local function Counts(set)
+    local have, total = 0, 0
+    for _, piece in ipairs(Shown(set)) do
+        total = total + 1
+        if ns.IsCollected(piece.id) then have = have + 1 end
+    end
+    return have, total
+end
+
+local function PlayerCanWear(set)
+    local _, class = UnitClass("player")
+    if set[2] then return set[2] == class end
+    return set[3] <= (ns.CLASS_ARMOR[class] or 1)
+end
+
+local function ClassName(class)
+    return (LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[class]) or (class:sub(1, 1) .. class:sub(2):lower())
+end
+
+-- the class's own sets, then the armour sets of its armour type; favourites first, as in the game
+local function SetsFor(class, search)
+    local text = search ~= "" and search:lower() or nil
+    local out, names = {}, {}
+    for index, set in ipairs(ns.SETS or {}) do
+        local mine = set[2] == class or (set[2] == false and set[3] == ns.CLASS_ARMOR[class])
+        -- two of the game's sets can carry one name (an old and a Forever version): the first
+        -- the server knows is shown
+        if mine and #Shown(set) >= 2 and not names[set[4]]
+            and (not text or set[4]:lower():find(text, 1, true) or Label(set):lower():find(text, 1, true)) then
+            set.index = index
+            names[set[4]] = true
+            out[#out + 1] = set
+        end
+    end
+    local fav = ns.db.favSets
+    table.sort(out, function(a, b)
+        local fa, fb = fav[a[1]] and 1 or 0, fav[b[1]] and 1 or 0
+        if fa ~= fb then return fa > fb end
+        return a.index < b.index
+    end)
+    return out
+end
+
+-- The model: the bare character in the whole set, as the game's Sets view shows it (Undress,
+-- then every piece tried on). The look goes on again once the character has loaded (a TryOn
+-- while it loads is dropped, seen 2026-10-20). The game's dressing room scene frames the whole
+-- body; the try-on stage's transmog scene (290) cut him off at the knees (seen 2026-10-20).
+local SETS_SCENE = 596          -- DRESS_UP_FRAME_MODEL_SCENE_ID, Blizzard_UIPanels_Game DressUpFrames.lua
+local REASON_TEXT = { [1] = "not for this race", [2] = "cannot be worn", [3] = "still loading from the server" }
+
+local function DressSetModel(reload)
+    local scene = sets.scene
+    if not scene then return end
+    if not scene:GetActiveCamera() then
+        scene:TransitionToModelSceneID(SETS_SCENE, CAMERA_TRANSITION_TYPE_IMMEDIATE, CAMERA_MODIFICATION_TYPE_DISCARD, true)
+        scene.ControlFrame:UpdateLayout()
+        -- a little further back than the dressing room's own start, head to feet in view
+        -- (his words: "zoomed a bit too far in as default still")
+        -- (0.8.3's x1.3 did nothing: the scene starts at its furthest allowed distance, so the
+        -- furthest distance is raised first)
+        local camera = scene:GetActiveCamera()
+        if camera and camera.GetZoomDistance and camera.SetMaxZoomDistance then
+            local distance = camera:GetZoomDistance()
+            camera:SetMaxZoomDistance(math.max(camera:GetMaxZoomDistance(), distance * 1.6))
+            camera:SetZoomDistance(distance * 1.35)
+            if camera.SnapAllInterpolatedValues then camera:SnapAllInterpolatedValues() end
+        end
+    end
+    local actor = scene:GetPlayerActor()
+    if not actor or not sets.pick then return end
+    sets.details.shown:SetText("")
+    -- the same dressing as the try-on stage (reload, dress on load, retry pieces still loading);
+    -- what does not go on is said under the model, with the game's reason
+    DressActor(actor, Shown(sets.pick), true, function(notShown)
+        local count = {}
+        for _, entry in ipairs(notShown) do count[entry[2]] = (count[entry[2]] or 0) + 1 end
+        local parts = {}
+        for reason, n in pairs(count) do
+            parts[#parts + 1] = string.format("%d %s", n, REASON_TEXT[reason] or ("not shown (" .. reason .. ")"))
+        end
+        sets.details.shown:SetText(#parts > 0 and ("Pieces not on the model: " .. table.concat(parts, ", ")) or "")
+    end)
+end
+
+ReloadSetModel = function()
+    if pages.sets and pages.sets:IsShown() then DressSetModel(true) end
+end
+
+local function PieceTooltip(owner, itemID)
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    GameTooltip:SetItemByID(itemID)
+    if ns.IsCollected(itemID) then
+        GameTooltip:AddLine("Collected", 0.25, 0.85, 0.42)
+    elseif ns.IsOwned(itemID) then
+        GameTooltip:AddLine("In your bags", 0.25, 0.85, 0.42)
+    else
+        GameTooltip:AddLine("Not collected", 0.6, 0.6, 0.6)
+    end
+    GameTooltip:Show()
+end
+
+local function ShowDetails(set)
+    local d = sets.details
+    d:SetShown(set ~= nil)
+    sets.scene:SetShown(set ~= nil)
+    for _, frame in ipairs(sets.pieces) do frame:Hide() end
+    if not set then return end
+    -- a long name goes to two lines in the smaller font, as the game's LongName does
+    d.name:SetText(set[4])
+    d.name:Show()
+    d.longName:Hide()
+    if d.name:IsTruncated() then
+        d.name:Hide()
+        d.longName:SetText(set[4])
+        d.longName:Show()
+    end
+    d.label:SetText(Label(set))
+    local list = Shown(set)
+    local x = -math.floor((#list - 1) * PIECE_SPACE / 2)
+    for i, piece in ipairs(list) do
+        local frame = sets.pieces[i]
+        frame.itemID = piece.id
+        -- the name and quality (the border's colour) come from the server: asked for the shown
+        -- set only, GET_ITEM_INFO_RECEIVED draws the page again
+        if not C_Item.GetItemInfo(piece.id) then C_Item.RequestLoadItemDataByID(piece.id) end
+        frame.icon:SetTexture(C_Item.GetItemIconByID(piece.id))
+        local _, quality = ns.ItemInfo(piece.id)
+        frame.border:SetAtlas("loottab-set-itemborder-" .. (QUALITY_BORDER[quality or 1] or "white"), true)
+        -- collected pieces in full colour; the rest faded, as in the game
+        local collected = ns.IsCollected(piece.id)
+        frame.icon:SetDesaturated(not collected)
+        frame.icon:SetAlpha(collected and 1 or 0.3)
+        frame.border:SetDesaturated(not collected)
+        frame.border:SetAlpha(collected and 1 or 0.3)
+        frame.owned:SetShown(not collected and ns.IsOwned(piece.id))
+        frame:ClearAllPoints()
+        frame:SetPoint("TOP", d, "TOP", x + (i - 1) * PIECE_SPACE, -94)
+        frame:Show()
+    end
+    local have, total = Counts(set)
+    d.count:SetFormattedText("%d of %d pieces collected", have, total)
+    if PlayerCanWear(set) then
+        d.note:SetText("")
+    elseif set[2] then
+        d.note:SetFormattedText("%s set: your character cannot wear it", ClassName(set[2]))
+    else
+        d.note:SetFormattedText("%s: your character cannot wear it", ns.ARMOR_TYPES[set[3]])
+    end
+    d.favorite:SetText(ns.db.favSets[set[1]] and "Unfavourite" or "Favourite")
+    if sets.dressed ~= set[1] then
+        sets.dressed = set[1]
+        DressSetModel()
+    end
+end
+
+local function InitSetButton(button, set)
+    if not button.made then
+        button.made = true
+        -- WardrobeSetsScrollFrameButtonTemplate, made in code
+        button:SetSize(208, 46)
+        button.bg = button:CreateTexture(nil, "BACKGROUND")
+        button.bg:SetAtlas("PetList-ButtonBackground")
+        button.bg:SetAllPoints()
+        local iconFrame = CreateFrame("Frame", nil, button)
+        iconFrame:SetSize(38, 38)
+        iconFrame:SetPoint("LEFT", -42, 0)
+        button.icon = iconFrame:CreateTexture(nil, "ARTWORK")
+        button.icon:SetAllPoints()
+        button.cover = iconFrame:CreateTexture(nil, "OVERLAY", nil, -1)
+        button.cover:SetAllPoints()
+        button.cover:SetColorTexture(0, 0, 0, 0.7)
+        button.fav = iconFrame:CreateTexture(nil, "OVERLAY", nil, 1)
+        button.fav:SetAtlas("PetJournal-FavoritesIcon", true)
+        button.fav:SetPoint("TOPLEFT", -8, 8)
+        button.name = button:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        button.name:SetSize(190, 0)
+        button.name:SetPoint("LEFT", 6, 6)
+        button.name:SetJustifyH("LEFT")
+        button.name:SetWordWrap(false)
+        button.label = button:CreateFontString(nil, "ARTWORK", "GameFontDisableSmallLeft")
+        button.label:SetSize(190, 0)
+        button.label:SetPoint("TOPLEFT", button.name, "BOTTOMLEFT", 0, -2)
+        button.label:SetMaxLines(1)
+        button.label:SetTextColor(0.329, 0.329, 0.329)
+        button.progress = button:CreateTexture(nil, "ARTWORK")
+        button.progress:SetSize(PROGRESS_W, 2)
+        button.progress:SetPoint("TOPLEFT", button.bg, "BOTTOMLEFT", 2, 4)
+        button.progress:SetColorTexture(0.0118, 0.247, 0.00392, 1)
+        button.selected = button:CreateTexture(nil, "OVERLAY")
+        button.selected:SetAtlas("PetList-ButtonSelect")
+        button.selected:SetAllPoints()
+        button:SetHighlightAtlas("PetList-ButtonHighlight")
+        button:SetScript("OnClick", function(self)
+            state.setPick[state.setClass] = self.set[1]
+            RefreshSets()
+        end)
+        button:SetScript("OnEnter", function(self)
+            local s = self.set
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(s[4], 1, 0.82, 0)
+            GameTooltip:AddLine(Label(s), 0.8, 0.8, 0.8)
+            local have, total = Counts(s)
+            GameTooltip:AddLine(string.format("%d of %d pieces collected", have, total), 1, 1, 1)
+            for _, piece in ipairs(Shown(s)) do
+                local name, quality = ns.ItemInfo(piece.id)
+                local r, g, b = C_Item.GetItemQualityColor(quality or 1)
+                GameTooltip:AddDoubleLine(name or ("item " .. piece.id), ns.IsCollected(piece.id) and "Collected" or "",
+                    r, g, b, 0.25, 0.85, 0.42)
+            end
+            GameTooltip:Show()
+        end)
+        button:SetScript("OnLeave", GameTooltip_Hide)
+    end
+    button.set = set
+    local have, total = Counts(set)
+    local complete = have == total
+    local color = complete and GOLD or (have > 0 and IN_PROGRESS or GREY)
+    -- one line: a name too long for it goes to the small font, so the source line stays inside
+    button.name:SetFontObject("GameFontNormal")
+    button.name:SetText(set[4])
+    if button.name:IsTruncated() then button.name:SetFontObject("GameFontNormalSmall") end
+    button.name:SetJustifyH("LEFT")
+    button.name:SetTextColor(color[1], color[2], color[3])
+    button.label:SetText(Label(set))
+    button.icon:SetTexture(C_Item.GetItemIconByID(Shown(set)[1].id))
+    button.icon:SetDesaturated(have == 0)
+    -- red when this character cannot wear it, as the game marks a set not valid for the character
+    local tint = PlayerCanWear(set) and { 1, 1, 1 } or RED
+    button.icon:SetVertexColor(tint[1], tint[2], tint[3])
+    button.cover:SetShown(not complete)
+    button.fav:SetShown(ns.db.favSets[set[1]] and true or false)
+    button.progress:SetShown(have > 0 and not complete)
+    button.progress:SetWidth(math.max(1, PROGRESS_W * have / math.max(total, 1)))
+    button.selected:SetShown(sets.pick == set)
+end
+
+RefreshSets = function()
+    if not window or not pages.sets:IsShown() then return end
+    -- the player's own class until another is chosen
+    state.setClass = state.setClass or select(2, UnitClass("player"))
+    AskPieces()
+    local class = state.setClass
+    local list = SetsFor(class, state.search)
+    for key, button in pairs(sets.classButtons) do button.selected:SetShown(key == class) end
+    local pick
+    for _, set in ipairs(list) do if set[1] == state.setPick[class] then pick = set end end
+    pick = pick or list[1]
+    state.setPick[class] = pick and pick[1]
+    sets.pick = pick
+    sets.scroll:SetDataProvider(CreateDataProvider(list), ScrollBoxConstants.RetainScrollPosition)
+    local complete = 0
+    for _, set in ipairs(list) do
+        local have, total = Counts(set)
+        if have == total then complete = complete + 1 end
+    end
+    local c = C_ClassColor and C_ClassColor.GetClassColor(class)
+    local name = c and c:WrapTextInColorCode(ClassName(class)) or ClassName(class)
+    sets.total:SetFormattedText("%s: %d sets, |cffffffff%d complete|r", name, #list, complete)
+    sets.empty:SetShown(#list == 0)
+    ShowDetails(pick)
+end
+
+local function BuildSets(page)
+    local left = CreateFrame("Frame", nil, page, "InsetFrameTemplate")
+    left:SetPoint("TOPLEFT")
+    left:SetPoint("BOTTOMLEFT")
+    left:SetWidth(260)
+
+    -- one button per class, the chosen one ringed; the player's class to begin with
+    local size, gap = 26, 2
+    for i, class in ipairs(CLASS_ORDER) do
+        local button = CreateFrame("Button", nil, left)
+        button:SetSize(size, size)
+        button:SetPoint("TOPLEFT", 6 + (i - 1) * (size + gap), -6)
+        local icon = button:CreateTexture(nil, "ARTWORK")
+        icon:SetAtlas("classicon-" .. class:lower())
+        icon:SetAllPoints()
+        button.selected = button:CreateTexture(nil, "OVERLAY")
+        button.selected:SetAtlas("transmog-frame-small-selected")
+        button.selected:SetPoint("CENTER")
+        button.selected:SetSize(size + 10, size + 10)
+        button:SetHighlightAtlas("transmog-frame-highlighted-small", "ADD")
+        button:SetScript("OnClick", function()
+            if state.setClass == class then return end
+            state.setClass = class
+            RefreshSets()
+            sets.scroll:ScrollToBegin()
+        end)
+        button:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
+            local c = C_ClassColor and C_ClassColor.GetClassColor(class)
+            GameTooltip:SetText(ClassName(class), c and c.r or 1, c and c.g or 1, c and c.b or 1)
+            GameTooltip:AddLine("Show this class's sets.", 0.9, 0.9, 0.9)
+            GameTooltip:Show()
+        end)
+        button:SetScript("OnLeave", GameTooltip_Hide)
+        sets.classButtons[class] = button
+    end
+
+    -- the list: the game's ScrollBox with its thin scroll bar, buttons 44 px in from the left for
+    -- the icon (WardrobeSetsCollectionContainerMixin:OnLoad); the bar stands in the 22 px gap
+    -- between the list and the model, as in the game's Sets view
+    sets.scroll = CreateFrame("Frame", nil, left, "WowScrollBoxList")
+    sets.scroll:SetPoint("TOPLEFT", 3, -40)
+    sets.scroll:SetPoint("BOTTOMLEFT", 3, 26)
+    sets.scroll:SetWidth(255)
+    local bar = CreateFrame("EventFrame", nil, page, "MinimalScrollBar")
+    bar:SetPoint("TOPLEFT", sets.scroll, "TOPRIGHT", 8, 0)
+    bar:SetPoint("BOTTOMLEFT", sets.scroll, "BOTTOMRIGHT", 8, 0)
+    local view = CreateScrollBoxListLinearView()
+    view:SetElementInitializer("Button", InitSetButton)
+    view:SetElementExtent(46)
+    view:SetPadding(0, 0, 44, 0, 0)
+    ScrollUtil.InitScrollBoxListWithScrollBar(sets.scroll, bar, view)
+    sets.total = Text(left, "GameFontNormalSmall")
+    sets.total:SetPoint("BOTTOMLEFT", 10, 8)
+    sets.empty = Text(left, "GameFontDisable", "No set matches the search.")
+    sets.empty:SetPoint("TOP", 0, -70)
+
+    -- the character in the set before the race backdrop, as in the try-on stage
+    local right = CreateFrame("Frame", nil, page, "InsetFrameTemplate")
+    right:SetPoint("TOPLEFT", left, "TOPRIGHT", 22, 0)
+    right:SetPoint("BOTTOMRIGHT")
+    local backdrop = right:CreateTexture(nil, "BACKGROUND", nil, 1)
+    backdrop:SetPoint("TOPLEFT", 3, -3)
+    backdrop:SetPoint("BOTTOMRIGHT", -3, 3)
+    right:SetScript("OnShow", function() RaceBackdrop(backdrop) end)
+    sets.scene = CreateFrame("ModelScene", nil, right, "PanningModelSceneMixinTemplate")
+    sets.scene:SetPoint("TOPLEFT", 3, -3)
+    sets.scene:SetPoint("BOTTOMRIGHT", -3, 3)
+    sets.scene.ControlFrame = CreateFrame("Frame", nil, sets.scene, "ModelSceneControlFrameTemplate")
+    sets.scene.ControlFrame:SetPoint("BOTTOM", 0, 70)
+    sets.scene.ControlFrame:SetModelScene(sets.scene)
+    sets.scene.ControlFrame:Show()
+    sets.scene:HookScript("OnLeave", function() sets.scene.ControlFrame:Show() end)
+
+    -- the game's DetailsFrame over the model: fade, gold name, source, the row of pieces
+    local d = CreateFrame("Frame", nil, right)
+    d:SetPoint("TOPLEFT", 0, -3)
+    d:SetPoint("BOTTOMRIGHT", -3, 2)
+    d:SetFrameLevel(sets.scene:GetFrameLevel() + 5)
+    sets.details = d
+    local fade = d:CreateTexture(nil, "BACKGROUND")
+    fade:SetAtlas("transmog-set-model-cutoff-fade")
+    fade:SetPoint("TOPLEFT", 2, 0)
+    fade:SetPoint("TOPRIGHT")
+    fade:SetHeight(178)
+    local row = d:CreateTexture(nil, "BORDER")
+    row:SetAtlas("transmog-set-iconrow-background", true)
+    row:SetPoint("TOP", 0, -78)
+    local function Title(font, y, lines)
+        local fs = d:CreateFontString(nil, "ARTWORK", font)
+        fs:SetSize(380, 0)
+        fs:SetPoint("TOP", 0, y)
+        fs:SetMaxLines(lines)
+        fs:SetTextColor(1, 0.82, 0)
+        fs:SetShadowOffset(1, -1)
+        fs:SetShadowColor(0, 0, 0)
+        return fs
+    end
+    d.name = Title("Fancy24Font", -37, 1)
+    d.longName = Title("Fancy16Font", -30, 2)
+    d.label = d:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    d.label:SetSize(380, 0)
+    d.label:SetPoint("TOP", 0, -63)
+    d.label:SetMaxLines(1)
+
+    -- WardrobeSetsDetailsItemFrameTemplate: the piece's icon in the quality border
+    for i = 1, 11 do
+        local frame = CreateFrame("Frame", nil, d)
+        frame:SetSize(32, 32)
+        frame.icon = frame:CreateTexture(nil, "BORDER")
+        frame.icon:SetSize(28, 28)
+        frame.icon:SetPoint("CENTER")
+        frame.border = frame:CreateTexture(nil, "OVERLAY")
+        frame.border:SetAtlas("loottab-set-itemborder-white", true)
+        frame.border:SetPoint("RIGHT", frame.icon, "CENTER", 20, 1)
+        frame.owned = frame:CreateTexture(nil, "OVERLAY", nil, 2)
+        frame.owned:SetAtlas("transmog-icon-checkmark")
+        frame.owned:SetSize(14, 14)
+        frame.owned:SetPoint("BOTTOMRIGHT", 3, -3)
+        frame:EnableMouse(true)
+        frame:SetScript("OnEnter", function(self) if self.itemID then PieceTooltip(self, self.itemID) end end)
+        frame:SetScript("OnLeave", GameTooltip_Hide)
+        frame:Hide()
+        sets.pieces[i] = frame
+    end
+
+    -- what to do with the set, along the bottom: every action a visible button
+    d.count = Text(d, "GameFontHighlight")
+    d.count:SetPoint("BOTTOMLEFT", 12, 44)
+    d.shown = Text(d, "GameFontDisableSmall")
+    d.shown:SetPoint("BOTTOM", 0, 64)
+    d.note = Text(d, "GameFontRedSmall")
+    d.note:SetPoint("BOTTOMRIGHT", -12, 46)
+    d.note:SetJustifyH("RIGHT")
+    local tryOn = Button(d, "Try On", 150, 24)
+    tryOn:SetPoint("BOTTOMLEFT", 10, 12)
+    tryOn:SetScript("OnClick", function()
+        local set = sets.pick
+        if not set then return end
+        -- the whole set on the try-on model, alone, ready to change piece by piece and save
+        wipe(state.wearing)
+        for _, piece in ipairs(Shown(set)) do state.wearing[piece.slot] = piece.id end
+        state.bare = true
+        nameBox:SetText(set[4])
+        SelectPage("collection")
+        DressStage()
+    end)
+    local save = Button(d, "Save as Outfit", 150, 24)
+    save:SetPoint("LEFT", tryOn, "RIGHT", 6, 0)
+    save:SetScript("OnClick", function()
+        local set = sets.pick
+        if not set then return end
+        local items = {}
+        for _, piece in ipairs(Shown(set)) do items[piece.slot] = piece.id end
+        table.insert(ns.db.outfits, 1, { name = set[4], items = items })
+        state.outfitPage = 1
+        ns.Print("saved %s as an outfit.", set[4])
+    end)
+    d.favorite = Button(d, "Favourite", 120, 24)
+    d.favorite:SetPoint("BOTTOMRIGHT", -10, 12)
+    d.favorite:SetScript("OnClick", function()
+        local set = sets.pick
+        if not set then return end
+        ns.db.favSets[set[1]] = not ns.db.favSets[set[1]] or nil
+        RefreshSets()
+    end)
+end
+
 local function Build()
     window = CreateFrame("Frame", "DenoWardrobeFrame", UIParent, "ButtonFrameTemplate")
     window:SetSize(LEFT_W + 300, 662)
@@ -618,7 +1198,9 @@ local function Build()
             pending = nil
             if text ~= state.search then
                 state.search, state.page = text, 1
-                if not pages.collection:IsShown() then SelectPage("collection") else Refresh() end
+                -- the Sets page searches its own list; elsewhere the search shows the looks
+                if pages.sets:IsShown() then RefreshSets()
+                elseif pages.collection:IsShown() then Refresh() else SelectPage("collection") end
             end
         end)
     end)
@@ -632,10 +1214,15 @@ local function Build()
     end
     BuildCollection(pages.collection)
     BuildOutfits(pages.outfits)
+    -- the Sets page spans the whole window: it has its own model
+    pages.sets = CreateFrame("Frame", nil, window)
+    pages.sets:SetPoint("TOPLEFT", 6, -58)
+    pages.sets:SetPoint("BOTTOMRIGHT", -6, 8)
+    BuildSets(pages.sets)
 
     -- the game's bottom tabs (they size themselves on show from these two)
     window.minTabWidth, window.tabPadding = 110, 20
-    local tabNames = { "Collection", "Outfits" }
+    local tabNames = { "Collection", "Sets", "Outfits" }
     for i, label in ipairs(tabNames) do
         local tab = CreateFrame("Button", "DenoWardrobeFrameTab" .. i, window, "PanelTabButtonTemplate")
         tab:SetID(i)
@@ -645,14 +1232,14 @@ local function Build()
         else
             tab:SetPoint("LEFT", tabs[i - 1], "RIGHT", -16, 0)
         end
-        tab:SetScript("OnClick", function() SelectPage(i == 1 and "collection" or "outfits") end)
+        tab:SetScript("OnClick", function() SelectPage(PAGE_ORDER[i]) end)
         tabs[i] = tab
     end
     window.Tabs = tabs
     PanelTemplates_SetNumTabs(window, #tabs)
 
     -- try-on: the player in what has been picked, before the race backdrop of the transmog window
-    local stage = CreateFrame("Frame", nil, window, "InsetFrameTemplate")
+    stage = CreateFrame("Frame", nil, window, "InsetFrameTemplate")
     stage:SetPoint("TOPLEFT", pages.collection, "TOPRIGHT", 4, 0)
     stage:SetPoint("BOTTOMRIGHT", -6, 8)
     local STAGE_BOTTOM = 222
@@ -672,6 +1259,7 @@ local function Build()
     scene:HookScript("OnLeave", function() scene.ControlFrame:Show() end)
     -- reachable for tests and other addons
     window.scene, window.tiles, window.slotButtons, window.wornButtons = scene, tiles, slotButtons, wornButtons
+    window.sets = sets
     local stageTitle = Text(stage, "GameFontNormal", "Try On")
     stageTitle:SetPoint("TOP", 0, -10)
     local moveHint = Text(stage, "GameFontDisableSmall", "Drag: turn   Wheel: zoom   Right-drag: move")
@@ -805,14 +1393,14 @@ local function Build()
     window:SetScript("OnEvent", function(_, event, itemID, success)
         -- an item the game does not know (the loot list is ahead of or beside this game's data) is left out
         if event == "GET_ITEM_INFO_RECEIVED" then
-            if success == false then ns.Missing(itemID, true) else ns.RememberName(itemID) end
+            if success == false then ns.Missing(itemID, true) else ns.NotMissing(itemID) ns.RememberName(itemID) end
             -- many names arrive while warming: draw again at most twice a second
             if refreshQueued or not window:IsShown() then return end
             refreshQueued = true
             C_Timer.After(0.5, function()
                 refreshQueued = false
                 if not window:IsShown() then return end
-                if pages.collection:IsShown() then Refresh() else RefreshOutfits() end
+                RefreshShown()
             end)
             return
         end
@@ -822,8 +1410,10 @@ local function Build()
         if event == "UNIT_MODEL_CHANGED" or event == "PLAYER_EQUIPMENT_CHANGED" then
             for _, tile in ipairs(tiles) do tile.model.setupFor = nil tile.dressed = nil end
             if not state.bare then DressStage() end
+            -- the Sets model is the bare character: only a new body (race, form) reloads it
+            if event == "UNIT_MODEL_CHANGED" then ReloadSetModel() end
         end
-        if pages.collection:IsShown() then Refresh() else RefreshOutfits() end
+        RefreshShown()
     end)
 end
 

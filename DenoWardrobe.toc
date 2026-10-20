@@ -1,8 +1,8 @@
 ## Interface: 16001
 ## Title: Deno Wardrobe
-## Notes: A wardrobe for WoW: Forever on its own tab of the character screen. Browse thousands of looks with your own character in every preview, try them on a turnable model, filter by armour or weapon type, and save named outfits to equip or send to the transmogrifier. Looks come live from AtlasLoot Forever, Forever Dungeon Journal and Questie when installed, plus the world and what you find.
+## Notes: A wardrobe for WoW: Forever on its own tab of the character screen. Browse thousands of looks with your own character in every preview, try them on a turnable model, filter by armour or weapon type, browse every class's dungeon, tier and PvP sets on a Sets page like the game's own, and save named outfits to equip or send to the transmogrifier. Looks come live from AtlasLoot Forever, Forever Dungeon Journal and Questie when installed, plus the world and what you find.
 ## Author: Deniz
-## Version: 0.7.1
+## Version: 0.8.5
 ## Category: Collections
 ## SavedVariables: DenoWardrobeDB
 ## OptionalDeps: AtlasLootClassic, QuestieDB, ForeverDungeonJournal, TalentsForeverBook
@@ -12,6 +12,7 @@ UI.lua
 ServerLooks.lua
 Looks.lua
 Names.lua
+Sets.lua
 Catalog.lua
 Found.lua
 Wear.lua

@@ -27,6 +27,7 @@ ns.defaults = {
     found = {},         -- [itemID] = where it was met: looks AtlasLoot and the world list do not have
     quality = {},       -- [itemID] = quality the game told us, shown at once next session
     unknown = {},       -- [itemID] = true: the server said there is no such item (this game build)
+    favSets = {},       -- [setID] = true: sets marked Favourite on the Sets page, listed first
 }
 
 function ns.Print(fmt, ...)
