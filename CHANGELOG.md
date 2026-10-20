@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1 — 2026-10-20
+
+- The "Not shown on your character" note no longer shows on a tile before its look is drawn
+
 ## 0.7.0 — 2026-10-20
 
 First public release.
