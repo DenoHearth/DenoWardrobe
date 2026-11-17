@@ -427,17 +427,58 @@ local function Matches(look, text)
     return (name and name:find(text, 1, true)) or (source and source:lower():find(text, 1, true))
 end
 
+-- 0.9.0 (asked for on CurseForge, 2026-11-17: "as a priest it shows me mage and warlock specific
+-- pieces"): looks made for other classes are left out while "My class" is on. A piece is made
+-- for a class when it belongs to that class's set (Sets.lua) or the game's item table limits it
+-- to some classes (Classes.lua); the item table alone misses most tier pieces.
+local CLASS_BIT = { WARRIOR = 1, PALADIN = 2, HUNTER = 4, ROGUE = 8, PRIEST = 16, SHAMAN = 64,
+    MAGE = 128, WARLOCK = 256, DRUID = 1024 }
+local classMasks
+
+local function ClassMasks()
+    if classMasks then return classMasks end
+    classMasks = {}
+    local fromSets = {}
+    for _, set in ipairs(ns.SETS or {}) do
+        local bitValue = set[2] and CLASS_BIT[set[2]]
+        if bitValue then
+            for _, itemID in pairs(set[6]) do
+                local mask = fromSets[itemID] or 0
+                if math.floor(mask / bitValue) % 2 == 0 then fromSets[itemID] = mask + bitValue end
+            end
+        end
+    end
+    for itemID, mask in pairs(ns.ITEM_CLASSES or {}) do classMasks[itemID] = mask end
+    for itemID, mask in pairs(fromSets) do classMasks[itemID] = mask end
+    return classMasks
+end
+
+function ns.ForMyClass(itemID)
+    local mask = ClassMasks()[itemID]
+    if not mask then return true end
+    local _, class = UnitClass("player")
+    local bitValue = CLASS_BIT[class]
+    if not bitValue then return true end
+    return math.floor(mask / bitValue) % 2 == 1
+end
+
+function ns.ClassOnly()
+    return not ns.db or ns.db.classOnly ~= false
+end
+
 -- The looks for one slot (or every slot while searching), cut to one armour type (nil = every
 -- type) and, in the hand slots, to one weapon type (nil = every type).
 function ns.Looks(slotKey, armor, search, weapon)
     local all = ns.BuildCatalog()
     local text = search and search ~= "" and search:lower() or nil
+    local classOnly = ns.ClassOnly()
     local out = {}
     for _, slot in ipairs(ns.SLOTS) do
         if text or slot.key == slotKey then
             for _, look in ipairs(all[slot.key]) do
                 if not missing[look.id] and not ns.IsJunk(look.id) and (not armor or look.armor == nil or look.armor == armor)
-                    and (weapon == nil or look.weapon == weapon) and Matches(look, text) then
+                    and (weapon == nil or look.weapon == weapon) and (not classOnly or ns.ForMyClass(look.id))
+                    and Matches(look, text) then
                     out[#out + 1] = look
                 end
             end

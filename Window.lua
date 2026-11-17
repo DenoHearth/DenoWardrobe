@@ -22,6 +22,7 @@ local window, tabs = nil, {}
 local stage           -- the try-on model at the right of the Collection and Outfits pages
 local pages = {}
 local slotButtons, armorButtons, tiles, wornButtons = {}, {}, {}, {}
+local classButton
 local weaponButtons = {}
 local scene, pageText, countText, emptyText, searchBox, nameBox, outfitRows = nil, nil, nil, nil, nil, nil, {}
 local outfitPageText
@@ -312,12 +313,12 @@ Refresh = function()
         for _, entry in ipairs(ns.WEAPON_TYPES[state.slot]) do
             if entry[1] == weapon then kind = " (" .. entry[2] .. ")" end
         end
-    elseif state.armor then
-        kind = " in " .. ns.ARMOR_TYPES[state.armor]
-    end
-    countText:SetFormattedText("%s: %d looks%s  |cffffffff%d collected|r", what, #looks, kind, collected)
+    end   -- the armour type needs no words: its button is the greyed one
+    countText:SetFormattedText("%s: %d looks%s\n|cffffffff%d collected|r", what, #looks, kind, collected)
     -- the hand slots swap the armour buttons for weapon types; only types that have looks
     for _, button in pairs(armorButtons) do button:SetShown(not hands) end
+    classButton:SetShown(not hands)
+    classButton:SetText(ns.ClassOnly() and "My class" or "Every class")
     for _, button in ipairs(weaponButtons) do button:Hide() end
     countText:ClearAllPoints()
     if hands then
@@ -340,7 +341,7 @@ Refresh = function()
         -- the weapon rows fill the line: the count goes above the page arrows
         countText:SetPoint("BOTTOM", 0, 46)
     else
-        countText:SetPoint("LEFT", armorButtons[0], "RIGHT", 12, 0)
+        countText:SetPoint("LEFT", classButton, "RIGHT", 10, 0)
     end
     emptyText:SetShown(#looks == 0)
     for key, button in pairs(slotButtons) do button.selected:SetShown(state.search == "" and key == state.slot) end
@@ -404,14 +405,36 @@ local function BuildCollection(page)
     -- armour types: the chosen one is greyed, as the game's own filter buttons are
     local labels = { "Cloth", "Leather", "Mail", "Plate", "All" }
     for key, label in ipairs(labels) do
-        local button = Button(page, label, 70, 22)
-        button:SetPoint("TOPLEFT", 14 + (key - 1) * 72, -58)
+        local button = Button(page, label, 62, 22)
+        button:SetPoint("TOPLEFT", 14 + (key - 1) * 64, -58)
         local armor = key ~= 5 and key or nil
         button:SetScript("OnClick", function() state.armor, state.page = armor, 1 Refresh() end)
         armorButtons[armor or 0] = button
     end
+    -- 0.9.0: looks of other classes' sets and class-only items in or out, one button
+    classButton = Button(page, "", 84, 22)
+    classButton:SetPoint("LEFT", armorButtons[0], "RIGHT", 6, 0)
+    classButton:SetScript("OnClick", function(self)
+        ns.db.classOnly = not ns.ClassOnly()
+        state.page = 1
+        Refresh()
+        if self:IsMouseOver() then self:GetScript("OnEnter")(self) end
+    end)
+    classButton:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:SetText(ns.ClassOnly() and "My class" or "Every class")
+        GameTooltip:AddLine(ns.ClassOnly()
+            and "Looks made for other classes (their tier and set pieces) are hidden. Click to show every class."
+            or "Looks of every class are shown. Click to hide looks made for other classes.", 0.9, 0.9, 0.9, true)
+        GameTooltip:Show()
+    end)
+    classButton:SetScript("OnLeave", GameTooltip_Hide)
     countText = Text(page, "GameFontNormal")
-    countText:SetPoint("LEFT", armorButtons[0], "RIGHT", 12, 0)
+    countText:SetPoint("LEFT", classButton, "RIGHT", 10, 0)
+    -- what is left of the row: the armour and class buttons end at 418 of LEFT_W
+    countText:SetWidth(LEFT_W - 14 - 5 * 64 - 6 - 84 - 10 - 8)
+    countText:SetWordWrap(true)
+    countText:SetMaxLines(2)
 
     -- weapon types for Main Hand and Off Hand, in place of the armour buttons: two rows of
     -- eight under the slot icons; the chosen one is greyed like the armour buttons

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.0 — 2026-11-17
+
+- New **My class** button beside the armour types: looks made for other classes (their tier and set pieces, and items the game limits to some classes) are hidden. Click it for **Every class**. On by default. Asked for on CurseForge.
+- The armour buttons are a little narrower to make room; the look count wraps onto two lines.
+
 ## 0.8.5 — 2026-10-20
 
 - New **Sets** tab, built like the game's own Sets view: every class's dungeon, raid, Zul'Gurub, Ahn'Qiraj and PvP sets, Forever's own raid and PvP spec sets, and Forever's dungeon and crafted armour sets

@@ -28,6 +28,7 @@ ns.defaults = {
     quality = {},       -- [itemID] = quality the game told us, shown at once next session
     unknown = {},       -- [itemID] = true: the server said there is no such item (this game build)
     favSets = {},       -- [setID] = true: sets marked Favourite on the Sets page, listed first
+    classOnly = true,   -- hide looks made for other classes (tier pieces and the like)
 }
 
 function ns.Print(fmt, ...)
