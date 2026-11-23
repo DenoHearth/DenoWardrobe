@@ -29,6 +29,7 @@ ns.defaults = {
     unknown = {},       -- [itemID] = true: the server said there is no such item (this game build)
     favSets = {},       -- [setID] = true: sets marked Favourite on the Sets page, listed first
     classOnly = true,   -- hide looks made for other classes (tier pieces and the like)
+    scale = 1,          -- window size, set with the - and + buttons in its title bar
 }
 
 function ns.Print(fmt, ...)

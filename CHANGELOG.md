@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.0 — 2026-11-24
+
+- New **-** and **+** buttons in the title bar make the whole window smaller or bigger (70% to 180%), so the models can be seen in more detail. The size is kept between sessions. Asked for on CurseForge.
+
 ## 0.9.1 — 2026-11-24
 
 - Click a look's picture to try it on; the **Try on** button is still there. Asked for on CurseForge.

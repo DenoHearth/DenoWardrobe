@@ -1201,6 +1201,24 @@ local function BuildSets(page)
     end)
 end
 
+local SCALE_MIN, SCALE_MAX = 0.7, 1.8
+
+-- where the window sits; offsets are divided by its own scale so a bigger window still starts
+-- at the same spot on screen
+local function Place()
+    window:ClearAllPoints()
+    local scale = window:GetScale()
+    if window.atTransmog then
+        -- the game's transmog window is wide and the character screen cannot open beside it:
+        -- over its right part, where its item list is; close this to see the game's window again
+        window:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -40 / scale, -90 / scale)
+    else
+        -- right of the side tabs, which stand out of the character screen's right edge
+        local modeTabs = CharacterFrame.ModeTabs
+        window:SetPoint("TOPLEFT", CharacterFrame, "TOPRIGHT", ((modeTabs and modeTabs:GetWidth() or 0) + 6) / scale, 0)
+    end
+end
+
 local function Build()
     window = CreateFrame("Frame", "DenoWardrobeFrame", UIParent, "ButtonFrameTemplate")
     window:SetSize(LEFT_W + 300, 662)
@@ -1212,6 +1230,35 @@ local function Build()
     ButtonFrameTemplate_HideButtonBar(window)
     window.Inset:Hide()
     window:Hide()
+
+    -- window size (asked on CurseForge 2026-11-23: "make the window scalable ... see the details
+    -- of the models"): Smaller / Bigger buttons in the title bar, kept between sessions
+    window:SetClampedToScreen(true)
+    window:SetScale(ns.db.scale or 1)
+    local function SizeButton(text, step, tip)
+        local button = Button(window, text, 22, 20)
+        button:SetScript("OnClick", function()
+            local scale = math.floor(((ns.db.scale or 1) + step) * 10 + 0.5) / 10
+            scale = math.max(SCALE_MIN, math.min(SCALE_MAX, scale))
+            if scale == ns.db.scale then return end
+            ns.db.scale = scale
+            window:SetScale(scale)
+            Place()
+            if GameTooltip:IsOwned(button) then button:GetScript("OnEnter")(button) end
+        end)
+        button:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
+            GameTooltip:SetText(tip, 1, 1, 1)
+            GameTooltip:AddLine(string.format("Window size now %d%%", (ns.db.scale or 1) * 100 + 0.5), 0.8, 0.8, 0.8)
+            GameTooltip:Show()
+        end)
+        button:SetScript("OnLeave", GameTooltip_Hide)
+        return button
+    end
+    local bigger = SizeButton("+", 0.1, "Bigger window")
+    bigger:SetPoint("TOPRIGHT", -26, -1)
+    local smaller = SizeButton("-", -0.1, "Smaller window")
+    smaller:SetPoint("RIGHT", bigger, "LEFT", -2, 0)
 
     window.sub = Text(window, "GameFontDisableSmall")
     window.sub:SetPoint("TOPRIGHT", -34, -32)
@@ -1388,16 +1435,7 @@ local function Build()
     hint:SetJustifyH("CENTER")
 
     window:SetScript("OnShow", function()
-        window:ClearAllPoints()
-        if window.atTransmog then
-            -- the game's transmog window is wide and the character screen cannot open beside it:
-            -- over its right part, where its item list is; close this to see the game's window again
-            window:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -40, -90)
-        else
-            -- right of the side tabs, which stand out of the character screen's right edge
-            local modeTabs = CharacterFrame.ModeTabs
-            window:SetPoint("TOPLEFT", CharacterFrame, "TOPRIGHT", (modeTabs and modeTabs:GetWidth() or 0) + 6, 0)
-        end
+        Place()
         ns.BuildCatalog()
         if ns.source then
             window.sub:SetFormattedText("%d looks from %s", ns.catalogSize, ns.source)
