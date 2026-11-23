@@ -501,6 +501,14 @@ local function BuildCollection(page)
         tile.button:SetPoint("TOP", tile.name, "BOTTOM", 0, -4)
         tile.button:SetScript("OnClick", function() if tile.look then TryOn(tile.look) end end)
         tile.model:EnableMouse(true)
+        -- a left click on the picture tries the look on too (asked on CurseForge 2026-11-23);
+        -- the Try on button stays. Released over the picture only, so a drag off it does nothing.
+        tile.model:SetScript("OnMouseUp", function(self, mouseButton)
+            if mouseButton == "LeftButton" and self:IsMouseOver() and tile.look
+                and state.wearing[tile.look.slot] ~= tile.look.id then
+                TryOn(tile.look)
+            end
+        end)
         tile.model:SetScript("OnEnter", function()
             if not tile.look then return end
             GameTooltip:SetOwner(tile.model, "ANCHOR_RIGHT")
@@ -508,6 +516,9 @@ local function BuildCollection(page)
             GameTooltip:AddLine("From: " .. (ns.SourceText(tile.look) or "?"), 0.6, 0.8, 1)
             if not ns.IsCollected(tile.look.id) and ns.IsOwned(tile.look.id) then
                 GameTooltip:AddLine("In your bags", 0.25, 0.85, 0.42)
+            end
+            if state.wearing[tile.look.slot] ~= tile.look.id then
+                GameTooltip:AddLine("Click to try on", 0, 1, 0)
             end
             GameTooltip:Show()
         end)

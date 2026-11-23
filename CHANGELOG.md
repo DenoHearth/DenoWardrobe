@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1 — 2026-11-24
+
+- Click a look's picture to try it on; the **Try on** button is still there. Asked for on CurseForge.
+
 ## 0.9.0 — 2026-11-17
 
 - New **My class** button beside the armour types: looks made for other classes (their tier and set pieces, and items the game limits to some classes) are hidden. Click it for **Every class**. On by default. Asked for on CurseForge.
